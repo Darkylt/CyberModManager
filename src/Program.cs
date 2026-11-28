@@ -9,6 +9,7 @@ internal static class Program
     static void Main()
     {
         ApplicationConfiguration.Initialize();
+        Theme.EnableDarkMode();
 
         ModStore store;
         try
@@ -25,9 +26,14 @@ internal static class Program
         Application.Run(new MainForm(store));
     }
 
+    // If that folder isn't writable, fall back to %LocalAppData%\CyberModManager
     static string ResolveDataDir()
     {
         var portable = Path.Combine(AppContext.BaseDirectory, "ModManagerData");
+        var local = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CyberModManager");
+
+        if (!HasState(portable) && HasState(local)) return local;
+
         try
         {
             Directory.CreateDirectory(portable);
@@ -38,7 +44,10 @@ internal static class Program
         }
         catch
         {
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CyberModManager");
+            return local;
         }
     }
+
+    static bool HasState(string dir) =>
+        File.Exists(Path.Combine(dir, "state.json")) || File.Exists(Path.Combine(dir, "state.json.bak"));
 }

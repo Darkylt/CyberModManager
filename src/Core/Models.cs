@@ -2,6 +2,10 @@ namespace CyberModManager.Core;
 
 public sealed class AppState
 {
+    // bumped when the file format changes in a way that needs migrating. Older files have 0/1.
+    // New fields must always be optional so state.json from older versions keeps loading
+    public int FormatVersion { get; set; } = 1;
+
     public string? GamePath { get; set; }
     public List<ModEntry> Mods { get; set; } = new();
 
@@ -18,6 +22,9 @@ public sealed class ModEntry
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N")[..12];
     public string Name { get; set; } = "";
+
+    // user-chosen category, null = uncategorized
+    public string? Category { get; set; }
 
     // file name of the stored copy inside the data folder's archives directory
     public string ArchiveFile { get; set; } = "";

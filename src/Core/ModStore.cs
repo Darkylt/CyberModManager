@@ -35,18 +35,49 @@ public sealed class ModStore
 
     // persistence
 
+    public string BackupStatePath => StatePath + ".bak";
+    bool _backedUpThisSession;
+
     void Load()
     {
-        if (!File.Exists(StatePath)) { State = new AppState(); return; }
-        var loaded = JsonSerializer.Deserialize<AppState>(File.ReadAllText(StatePath)) ?? new AppState();
-        loaded.FileOwners = new Dictionary<string, List<string>>(loaded.FileOwners, StringComparer.OrdinalIgnoreCase);
-        State = loaded;
+        if (!File.Exists(StatePath))
+        {
+            // a crash between writing the temp file and moving it leaves only the backup
+            State = File.Exists(BackupStatePath) ? Read(BackupStatePath) : new AppState();
+            return;
+        }
+        try
+        {
+            State = Read(StatePath);
+        }
+        catch (Exception ex) when (File.Exists(BackupStatePath))
+        {
+            try { State = Read(BackupStatePath); }
+            catch { throw new ModManagerException($"state.json is damaged ({ex.Message}) and the backup couldn't be read either.", ex); }
+        }
+    }
+
+    static AppState Read(string path)
+    {
+        var loaded = JsonSerializer.Deserialize<AppState>(File.ReadAllText(path)) ?? new AppState();
+        loaded.FileOwners = new Dictionary<string, List<string>>(loaded.FileOwners ?? new(), StringComparer.OrdinalIgnoreCase);
+        loaded.Mods ??= new();
+        loaded.CreatedDirs ??= new();
+        foreach (var m in loaded.Mods) m.Files ??= new();
+        return loaded;
     }
 
     public void Save()
     {
         lock (_lock)
         {
+            // keep a copy of the state as it was when this version of the app started, so an update
+            // never costs the mod list even if something goes wrong on the first save
+            if (!_backedUpThisSession && File.Exists(StatePath))
+            {
+                try { File.Copy(StatePath, BackupStatePath, overwrite: true); } catch { /* not fatal */ }
+                _backedUpThisSession = true;
+            }
             var tmp = StatePath + ".tmp";
             File.WriteAllText(tmp, JsonSerializer.Serialize(State, JsonOpts));
             File.Move(tmp, StatePath, overwrite: true);
@@ -84,19 +115,51 @@ public sealed class ModStore
         return entry;
     }
 
-    // replaces the stored archive of an existing (uninstalled) mod, e.g. for an update 
+    // replaces the stored archive of an existing (uninstalled) mod, e.g. for an update.
+    // The new file is copied next to the old one first, so a failed copy leaves the old archive intact
     public void ReplaceArchive(ModEntry m, string sourcePath)
     {
         if (m.Installed) throw new ModManagerException("Uninstall the mod before replacing its archive.");
+        if (!IsSupported(sourcePath))
+            throw new ModManagerException($"'{Path.GetFileName(sourcePath)}' isn't a supported archive (.zip, .7z, .rar).");
         var oldPath = ArchivePath(m);
-        m.ArchiveFile = m.Id + Path.GetExtension(sourcePath).ToLowerInvariant();
-        File.Copy(sourcePath, ArchivePath(m), overwrite: true);
+        var newFile = m.Id + Path.GetExtension(sourcePath).ToLowerInvariant();
+        var tmp = Path.Combine(ArchivesDir, newFile + ".new");
+        File.Copy(sourcePath, tmp, overwrite: true);
+        try
+        {
+            File.Move(tmp, Path.Combine(ArchivesDir, newFile), overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(tmp); } catch { }
+            throw;
+        }
+        m.ArchiveFile = newFile;
         if (!oldPath.Equals(ArchivePath(m), StringComparison.OrdinalIgnoreCase) && File.Exists(oldPath)) File.Delete(oldPath);
         m.ArchiveSize = new FileInfo(ArchivePath(m)).Length;
         m.OriginalFileName = Path.GetFileName(sourcePath);
         m.AddedAt = DateTime.Now;
         m.Password = null;
         Save();
+    }
+
+    // throws if a file isn't an archive we can read. Encrypted archives pass: the password is asked for at install
+    public static void CheckArchive(string path)
+    {
+        if (!IsSupported(path))
+            throw new ModManagerException($"'{Path.GetFileName(path)}' isn't a .zip / .7z / .rar archive.");
+        try
+        {
+            using var a = ArchiveFactory.OpenArchive(path);
+            if (!a.Entries.Any(e => !e.IsDirectory))
+                throw new ModManagerException($"'{Path.GetFileName(path)}' is empty.");
+        }
+        catch (Exception ex) when (IsPasswordError(ex)) { /* fine, it's just locked */ }
+        catch (Exception ex) when (ex is not ModManagerException)
+        {
+            throw new ModManagerException($"'{Path.GetFileName(path)}' couldn't be read as an archive ({ex.Message}).", ex);
+        }
     }
 
     // removes a mod from the list (uninstalling it first if needed) and deletes its stored archive
@@ -112,6 +175,34 @@ public sealed class ModStore
     {
         if (string.IsNullOrWhiteSpace(name)) return;
         m.Name = name.Trim();
+        Save();
+    }
+
+    // categories
+
+    public IReadOnlyList<string> Categories() =>
+        State.Mods.Select(m => m.Category).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase).ToList();
+
+    public void SetCategory(IEnumerable<ModEntry> mods, string? category)
+    {
+        category = string.IsNullOrWhiteSpace(category) ? null : category.Trim();
+        // reuse the existing spelling so "visuals" and "Visuals" don't become two categories
+        if (category != null)
+            category = Categories().FirstOrDefault(c => c.Equals(category, StringComparison.OrdinalIgnoreCase)) ?? category;
+        foreach (var m in mods) m.Category = category;
+        Save();
+    }
+
+    public void RenameCategory(string oldName, string newName)
+    {
+        if (string.IsNullOrWhiteSpace(newName)) return;
+        newName = newName.Trim();
+        // merging into another existing category keeps that one's spelling; a case-only rename is allowed
+        newName = Categories().FirstOrDefault(c => !c.Equals(oldName, StringComparison.OrdinalIgnoreCase) &&
+                                                   c.Equals(newName, StringComparison.OrdinalIgnoreCase)) ?? newName;
+        foreach (var m in State.Mods.Where(m => string.Equals(m.Category, oldName, StringComparison.OrdinalIgnoreCase)))
+            m.Category = newName;
         Save();
     }
 

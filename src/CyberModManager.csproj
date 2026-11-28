@@ -9,7 +9,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>CyberModManager</AssemblyName>
     <RootNamespace>CyberModManager</RootNamespace>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Product>Cyber Mod Manager</Product>
   </PropertyGroup>
 

@@ -86,6 +86,17 @@ try
     c = store.State.Mods.Single(m => m.Id == c.Id);
     Check(b.Installed && c.Installed && b.Files.Count == 3, "state persisted");
 
+    Console.WriteLine("Categories");
+    store.SetCategory([b], "Visuals");
+    store.SetCategory([c], "visuals ");
+    Check(c.Category == "Visuals", $"category reuses existing spelling (got '{c.Category}')");
+    store.RenameCategory("VISUALS", "Graphics");
+    store = new ModStore(data);
+    b = store.State.Mods.Single(m => m.Id == b.Id);
+    c = store.State.Mods.Single(m => m.Id == c.Id);
+    Check(b.Category == "Graphics" && c.Category == "Graphics" && store.Categories().SequenceEqual(["Graphics"]), "category rename persisted");
+    Check(File.Exists(store.BackupStatePath), "state backup written");
+
     Console.WriteLine("Uninstall B");
     store.Uninstall(b);
     Check(!File.Exists(G(@"r6\scripts\shared.reds")), "shared file gone (A was uninstalled earlier)");
@@ -119,6 +130,42 @@ try
     }
     Check(!bad.Installed && !File.Exists(G(@"archive\pc\mod\x.archive")), "partial install rolled back");
     Check(Read(@"bin\x64\locked.dll") == "orig", "locked file untouched");
+
+    Console.WriteLine("Update an installed mod");
+    var d = store.AddArchive(MakeZip("ModD.zip", new() { ["archive/pc/mod/d.archive"] = "D1", ["r6/scripts/d_old.reds"] = "old" }));
+    store.Rename(d, "My Mod D");
+    store.SetCategory([d], "Gameplay");
+    store.Install(d);
+    var garbage = Path.Combine(src, "ModD v2.zip");
+    File.WriteAllText(garbage, "this is not a zip");
+    try { ModStore.CheckArchive(garbage); Check(false, "broken archive should be rejected"); }
+    catch (ModManagerException) { Check(Read(@"archive\pc\mod\d.archive") == "D1", "broken update rejected before touching the installed mod"); }
+    var v2 = MakeZip("ModD-v2.zip", new() { ["archive/pc/mod/d.archive"] = "D2" });
+    ModStore.CheckArchive(v2);
+    store.Uninstall(d);
+    store.ReplaceArchive(d, v2);
+    store.Install(d);
+    Check(Read(@"archive\pc\mod\d.archive") == "D2", "new version installed");
+    Check(!File.Exists(G(@"r6\scripts\d_old.reds")), "files dropped in the new version removed");
+    Check(d.Name == "My Mod D" && d.Category == "Gameplay" && d.OriginalFileName == "ModD-v2.zip", "name and category kept, file name updated");
+    Check(!Directory.EnumerateFiles(store.ArchivesDir, "*.new").Any(), "no temp files left in archives folder");
+    store.Remove(d);
+
+    Console.WriteLine("Data from older versions");
+    var oldData = Path.Combine(root, "olddata");
+    Directory.CreateDirectory(oldData);
+    // state.json as written by 1.0.0: no FormatVersion, no Category
+    File.WriteAllText(Path.Combine(oldData, "state.json"), """
+        { "GamePath": "C:\\Games\\Cyberpunk 2077", "Mods": [ { "Id": "abc123", "Name": "Old Mod", "ArchiveFile": "abc123.zip",
+          "OriginalFileName": "Old Mod.zip", "ArchiveSize": 10, "AddedAt": "2026-01-01T00:00:00", "Installed": false, "Files": [] } ],
+          "FileOwners": {}, "CreatedDirs": [] }
+        """);
+    var old = new ModStore(oldData);
+    Check(old.State.Mods.Count == 1 && old.State.Mods[0].Name == "Old Mod" && old.State.Mods[0].Category == null, "1.0.0 state.json loads");
+    old.SetCategory(old.State.Mods, "Gameplay");
+    File.WriteAllText(old.StatePath, "{ broken");
+    old = new ModStore(oldData);
+    Check(old.State.Mods.Count == 1 && old.State.GamePath == @"C:\Games\Cyberpunk 2077", "damaged state.json falls back to the backup");
 
     // .7z / password tests need 7-Zip to build the archives
     var sevenZip = @"C:\Program Files\7-Zip\7z.exe";
